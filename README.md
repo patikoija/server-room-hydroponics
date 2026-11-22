@@ -7,6 +7,9 @@ The room is the grow space, which is the constraint that shapes everything: ambi
 is set by a server rack rather than chosen, so plant selection follows the measured room rather
 than the other way round.
 
+**New here?** [10 — First run](docs/10-first-run.md) is the build order; everything else is
+reference.
+
 **Status:** running. Three batches sown, two harvested. Water-level float ladder validated in
 both directions, reservoir pH reading continuously, flood cycle automated with four independent
 failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting on floor space.
@@ -26,6 +29,9 @@ failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting
 | [07 — Lighting](docs/07-lighting.md) | Two Spider Farmer SF600 bars, the whole-system photon budget, PPFD/DLI targets, hang height |
 | [08 — Automation](docs/08-automation.md) | The ebb-and-flow cycle, depth-driven timing, and the four failsafes |
 | [09 — The control chain](docs/09-control-chain.md) | Z-Wave stick → zwave-js → Home Assistant → ZEN20 strip, the firmware auto-off that is the real backstop, and the timing budget it belongs to |
+| [10 — First run](docs/10-first-run.md) | **Start here if you are building one.** Boxes to first flood, in the order that works, with what this build did out of order |
+| [11 — Sowing and the dry stage](docs/11-sowing.md) | Direct-sow, the desiccation gap that decides the whole method, three staged photoperiods, crop choice |
+| [12 — pH calibration](docs/12-ph-calibration.md) | Three-point procedure, a real run's numbers, the trust ladder, and why monthly calibration is 12× too often |
 | [`config/`](config/) | The ESPHome configuration that runs the controller, lightly sanitised |
 
 ---
