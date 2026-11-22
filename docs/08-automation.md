@@ -4,7 +4,8 @@ The flood cycle, the lights and the fans are run by Home Assistant as config-as-
 pump timers.
 
 The controller ([03](03-controller.md)) reports water level and pH; Home Assistant owns the
-decisions; switched outlets on a Z-Wave power strip do the actuating.
+decisions; a **Zooz ZEN20** five-outlet Z-Wave power strip does the actuating, reached through a
+Zooz 800 Series USB stick and `zwave-js-ui`.
 
 | Outlet | Load |
 |---|---|
@@ -12,6 +13,10 @@ decisions; switched outlets on a Z-Wave power strip do the actuating.
 | **3** | **fill pump** |
 | **4** | **drain pump** |
 | 5 | circulation fans |
+
+**The hardware, its wiring, the firmware auto-off timer and the full timing budget are in
+[09 — The control chain](09-control-chain.md).** That page is the one to read before plugging a
+pump into anything.
 
 ## One switch runs everything
 
@@ -74,8 +79,10 @@ before any flooding can resume. Belt and braces: the flood scheduler also refuse
 the phase is `empty`.
 
 The true hardware backstop for "the automation server is fully down while the fill pump is on" is
-**the plug's own auto-off timer**, set on the device itself — which is independent of anything
-running on a server.
+**the ZEN20's own auto-off timer**, set on the strip itself in firmware — independent of anything
+running on a server. It is set to 6 minutes, and
+[why it is 6 and not 7 or 8](09-control-chain.md#the-timing-budget-and-how-it-was-got-wrong-twice)
+is the most useful safety lesson in this repository.
 
 ## Failsafes
 

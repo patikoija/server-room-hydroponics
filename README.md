@@ -25,6 +25,7 @@ failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting
 | [06 — Nutrients](docs/06-nutrients.md) | Masterblend 4-18-38 three-part, dose order, EC and pH targets, and why pH goes last |
 | [07 — Lighting](docs/07-lighting.md) | Two Spider Farmer SF600 bars, the whole-system photon budget, PPFD/DLI targets, hang height |
 | [08 — Automation](docs/08-automation.md) | The ebb-and-flow cycle, depth-driven timing, and the four failsafes |
+| [09 — The control chain](docs/09-control-chain.md) | Z-Wave stick → zwave-js → Home Assistant → ZEN20 strip, the firmware auto-off that is the real backstop, and the timing budget it belongs to |
 | [`config/`](config/) | The ESPHome configuration that runs the controller, lightly sanitised |
 
 ---
@@ -39,7 +40,10 @@ failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting
   depth ladder from ~3" to ~13", five in the reservoir.
 - **pH:** Atlas Scientific EZO-pH circuit on an electrically isolated carrier, lab-grade
   double-junction probe, reading over I²C on the same bus as the input expanders.
-- **Pumps and lights:** switched outlets, driven by Home Assistant.
+- **Actuation:** a **Zooz 800 Series Z-Wave Stick** on USB → `zwave-js-ui` → Home Assistant →
+  a **Zooz ZEN20** five-outlet power strip. Pumps, both light bars and the fans are each their own
+  switched outlet. The strip's **own firmware auto-off timer** is the backstop that still works
+  when the server does not.
 - **Flood cycle:** fill → hold → drain, several times a day inside the lights-on window, with the
   flood depth stepping down as the crop ages (8" → 7" → 6").
 - **Nutrients:** Masterblend 4-18-38 + calcium nitrate + Epsom, mixed to EC ~1.2 mS/cm at
@@ -62,6 +66,10 @@ settled and wasn't:
   indistinguishable from dead on arrival.
 - A fill-rate figure measured on the fill bucket being used as the whole-system rate, which are
   different numbers for a good physical reason.
+- A hardware safety timer *raised* twice "for margin", which both times moved the last backstop
+  past the point where the buckets overflow.
+- A container that came up "running" with no network at all after a port collision, reporting
+  only `Z-Wave JS not ready` — which points at the radio, not at the port.
 - "Recalibrate the pH probe every 30–60 days" — consumer-grade advice applied to a lab-grade
   probe, about 12× too often, and over-calibration is not harmless.
 
@@ -82,6 +90,9 @@ matter:
 - A fill stopped at the ~9" float **settles back to ~8.8"**, which is small enough that
   trip-and-stop needs no top-up loop.
 - Reservoir pH drifts **up ~0.5 over three days** on a 60-gallon reservoir with a crop on it.
+- **29.9 s/inch** measured fill rate to the 11" float (three cycles: 324 / 328 / 334 s, mean 329).
+  The original 26 s/inch calibration was ~13% optimistic, and every safety bound computed from it
+  was 43 s short.
 
 ## Licence
 
