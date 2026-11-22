@@ -20,7 +20,18 @@ first and MID second silently discards the LOW point.
    not evidence of stability.
 3. **Before calibration it will read noticeably off, and that is the whole point.** Typical:
    ~0.4–0.6 high in 7.0 and 4.0, ~0.3–0.4 low in 10.0.
-4. **Trigger the matching calibration point.**
+4. **Trigger the matching calibration point.** The device exposes four buttons, which Home
+   Assistant surfaces from these ESPHome names:
+
+   | Button name on the device | Use |
+   |---|---|
+   | `pH cal MID 7.0 (do first)` | point 1 — clears any prior calibration |
+   | `pH cal low 4.0` | point 2 |
+   | `pH cal high 10.0` | point 3 |
+   | `pH clear calibration` | start over |
+
+   The "(do first)" is in the name on purpose: the ordering is not recoverable afterwards, and a
+   button list in a UI gives no hint which one to press first.
 5. **Confirm the reading snaps to the buffer value** on the next update.
 
 ## A real run

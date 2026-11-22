@@ -32,7 +32,8 @@ failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting
 | [10 — First run](docs/10-first-run.md) | **Start here if you are building one.** Boxes to first flood, in the order that works, with what this build did out of order |
 | [11 — Sowing and the dry stage](docs/11-sowing.md) | Direct-sow, the desiccation gap that decides the whole method, three staged photoperiods, crop choice |
 | [12 — pH calibration](docs/12-ph-calibration.md) | Three-point procedure, a real run's numbers, the trust ladder, and why monthly calibration is 12× too often |
-| [`config/`](config/) | The ESPHome configuration that runs the controller, lightly sanitised |
+| [`config/`](config/) | The **ESPHome** configuration that runs the controller — every float, its measured sense and trip depth |
+| [`homeassistant/`](homeassistant/) | The **Home Assistant** package and dashboard that run the cycle, with the eight entity IDs you have to make match |
 
 ---
 

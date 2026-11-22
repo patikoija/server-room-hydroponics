@@ -1,0 +1,533 @@
+# Hydroponics — YAML-mode Lovelace dashboard (config-as-code, deployed by the pipeline).
+# Registered in configuration.yaml under lovelace.dashboards.hydroponics.
+title: Hydroponics
+views:
+  - title: Hydroponics
+    path: hydroponics
+    icon: mdi:sprout
+    cards:
+      - type: markdown
+        content: >
+          ## 🌱 Hydroponics — {{ states('input_text.hydro_status') }}
+
+          **Crop:** {{ states('input_select.hydro_crop') }}  ·  **Phase:**
+          {{ states('input_select.hydro_phase') }}  ·  **Lights window now:**
+          {{ 'yes' if is_state('binary_sensor.hydro_in_light_window','on') else 'no' }}
+
+      # ---- Reservoir pH (Atlas EZO-pH on the KC868 I2C bus) ----
+      # Live entity confirmed reporting 2026-10-01 (~60s cadence). Target band 5.5–6.5 for
+      # leafy greens; gauge severity flags alkaline drift (the direction the reservoir actually
+      # drifts). The 48 h graph is for watching drift and for calibration (readings settle
+      # visibly before you fire Cal,low/high).
+      - type: gauge
+        entity: sensor.hydroponics_inputs_hydro_reservoir_ph
+        name: Reservoir pH
+        unit: pH
+        min: 4
+        max: 8
+        needle: true
+        severity:
+          green: 5.5
+          yellow: 6.5
+          red: 7
+      - type: history-graph
+        title: pH trend (48 h)
+        hours_to_show: 48
+        entities:
+          - entity: sensor.hydroponics_inputs_hydro_reservoir_ph
+            name: Reservoir pH
+
+      # ---- THE control: tick when plants go in, untick at harvest ----
+      - type: entities
+        title: Control
+        show_header_toggle: false
+        entities:
+          # START HERE for a new crop. This is the whole planting action: it clears the old
+          # crop, sets germination, stamps the sow date and schedules flooding. The two rows
+          # below it are then driven automatically and are shown for visibility, not input.
+          - entity: script.hydro_log_planting
+            name: "🌱  I planted today  (start a new crop)"
+            icon: mdi:seed
+          - entity: input_number.hydro_flood_start_day
+            name: Days from sow to first flood
+          - type: divider
+          - entity: input_boolean.hydro_occupied
+            name: Buckets occupied  (auto after the delay above; starts flooding)
+          - entity: input_select.hydro_growth_stage
+            name: Growth stage  (germination / seedling / mature)
+            icon: mdi:sprout
+          # The old label here read "(on from seedling, during lights)". That was wrong, and
+          # wrong in the direction that makes a working system look broken: on 2026-10-11 the
+          # stage WAS seedling, the light window WAS open and this toggle WAS on, so the label
+          # promised running fans -- while the automation correctly held them off, because the
+          # real gate is days-since-sow (sow 2026-10-07, fan start day 21 => 2026-10-28).
+          # Growth stage is a TRIGGER for the fan reconcile, never a CONDITION in it.
+          - entity: input_boolean.hydro_fans_enabled
+            name: Circulation fans  (auto, once past the day below — and only during lights)
+            icon: mdi:fan
+          # Surfaced 2026-10-11. This is the number that actually decides, so hiding it was
+          # what let the label drift unnoticed for days. It is a crop-safety knob, not a
+          # calibration knob: fans from day 0 killed 10 of 12 seedlings , which is why
+          # the default is deliberately late at 21 days.
+          - entity: input_number.hydro_fan_start_day
+            name: Fans start, days after sowing
+            icon: mdi:fan-clock
+          - entity: input_select.hydro_crop
+            name: Current crop
+          - type: divider
+          # Maintenance sits ABOVE fault on purpose. It is the one a person reaches for
+          # deliberately, before putting hands in the reservoir; fault is the one the system
+          # sets. Putting maintenance first also makes it the obvious lever, so nobody
+          # repurposes the fault latch and leaves someone else to "helpfully" clear it.
+          - entity: input_boolean.hydro_maintenance
+            name: Maintenance — hands-on work (blocks ALL flooding, incl. the button below)
+            icon: mdi:wrench-clock
+          - entity: input_boolean.hydro_fault_latch
+            name: Fault — auto-flood halted (toggle off to clear)
+            icon: mdi:alert
+
+      # ---- Manual flood: pick the fill-stop depth, THEN press the button ----
+      # Applies to THIS manual run only. 'Auto' follows the growth-stage schema (what the
+      # scheduler uses); the explicit depths let you flood higher/lower by hand regardless of
+      # stage — e.g. flood to 9" even while the stage's automatic cutoff is 7.5".
+      - type: entities
+        show_header_toggle: false
+        entities:
+          - entity: input_select.hydro_manual_flood_depth
+            name: Manual flood depth  (Auto = follow growth stage)
+            icon: mdi:arrow-collapse-down
+      - type: button
+        name: RUN a flood cycle now  (uses the depth above · refuses while Maintenance is on)
+        icon: mdi:water-sync
+        show_state: true
+        entity: script.hydro_flood_drain_cycle
+        tap_action:
+          action: toggle
+
+      # ---- What the system is doing right now (all auto-derived) ----
+      - type: markdown
+        title: What it's doing now (auto — you set nothing)
+        content: >
+          {% set p = state_attr('sensor.hydro_active_profile','profile') %}
+          {% if p is mapping %}
+          **Flood depth:** {{ states('sensor.hydro_target_depth') }}"  ·  **Fill:**
+          {{ states('sensor.hydro_fill_time') }}s  ·  **Drain:** {{ states('sensor.hydro_drain_time') }}s
+
+
+          **Lights:** {{ p['on'][:5] }} – {{ p['off'][:5] }}  ·  **Floods/day:** {{ p['floods'] }}
+
+
+          **Reservoir targets** — EC {{ p['ec'] }} · pH {{ p['ph'] }}
+          {% else %}
+          _profile unavailable_
+          {% endif %}
+
+      # ---- Live status / persistent state ----
+      - type: entities
+        title: Status
+        show_header_toggle: false
+        entities:
+          - entity: input_text.hydro_status
+            name: Status
+          - entity: input_select.hydro_phase
+            name: Phase (persistent, reboot-safe)
+          - entity: input_datetime.hydro_last_flood
+            name: Last flood
+          - entity: binary_sensor.hydro_in_light_window
+            name: In light window
+
+      # ---- Outlets (manual / visibility) ----
+      - type: entities
+        title: Outlets
+        show_header_toggle: false
+        entities:
+          - entity: switch.z_wave_plus_power_strip_1
+            name: Grow light 1
+          - entity: switch.z_wave_plus_power_strip_2
+            name: Grow light 2
+          - entity: switch.z_wave_plus_power_strip_3
+            name: Fill pump
+          - entity: switch.z_wave_plus_power_strip_4
+            name: Drain pump
+          - entity: switch.z_wave_plus_power_strip_5
+            name: Circulation fans
+
+      # ── LAST FIVE FILLS ─────────────────────────────────────────────────────────────────────
+      #
+      # Requested directly beneath Outlets. Format: "<when> <how> <depth REACHED>", e.g.
+      # "10-24 14:32 man 7.5in" or "10-24 03:00 auto 9in".
+      #
+      # THE DEPTH IS WHAT THE WATER REACHED, NOT WHAT WAS ASKED FOR, and that is the entire value
+      # of this card. counter.hydro_cycles_today read 3 on a day with zero completed fills, and a
+      # 9" run that stalled at 7" was read as a decision rather than a timeout. Logging targets
+      # would have preserved both illusions.
+      #
+      # Only COMPLETED fills are recorded -- a timed-out fill is not a fill. An empty log after an
+      # attempt therefore means the attempt did not finish, which is information rather than a bug.
+      - type: entities
+        title: Last 5 fills
+        show_header_toggle: false
+        entities:
+          - entity: input_text.hydro_fill_log
+            name: "when · how · depth reached"
+          - type: divider
+          - entity: input_datetime.hydro_last_flood
+            name: last COMPLETED full cycle
+          - entity: counter.hydro_cycles_today
+            name: attempts today  (not completions)
+
+      # ---- Grow area climate (moved here 2026-10-11) ----
+      # Relocated from the "Indoor Garden" pane on the Home/Mobile dashboards when that pane was
+      # retired in favour of this one. These are NOT decorative:
+      # packages/hydroponics.yaml gates on sensor.grow_room_air_temperature, so a
+      # flat battery in that sensor degrades the flood logic. The battery row is how that gets
+      # noticed, and after the pane removal this is the only place any of the three are shown.
+      - type: entities
+        title: Grow area climate
+        show_header_toggle: false
+        entities:
+          - entity: sensor.grow_room_air_temperature
+            name: Temperature
+            icon: mdi:thermometer
+          - entity: sensor.grow_room_humidity
+            name: Humidity
+            icon: mdi:water-percent
+          - entity: sensor.grow_room_sensor_battery
+            name: Sensor battery
+            icon: mdi:battery
+
+      # ---- System calibration/timer knobs REMOVED from the dashboard 2026-10-02 ----
+      # Depth is now MEASURED by the float sensors (6 in / 7.5 in / 9 in / 11 in), not from a
+      # fill-seconds x depth constant, so these manual knobs are no longer user controls. The
+      # input_number entities still EXIST — the flood script keeps hydro_fill_max_seconds etc.
+      # as failsafe BOUNDS (a pump moving no water / a float that never trips) — they are just
+      # not surfaced here as things to tune. Re-expose via Settings → Entities if ever needed.
+
+      # ── EVERY BOBBER, IN PHYSICAL ORDER ─────────────────────────────────────────────────────
+      #
+      # Requested 2026-10-24, and it earns its place: three days of misdiagnosis came from not
+      # being able to see which float was wet at a glance. The 2026-10-21 fault was a drain-pump
+      # POWER CORD holding a bobber up, and nothing on the dashboard would have shown it.
+      #
+      # LISTED BOTTOM TO TOP, matching how they are hung, because the whole meaning of this card
+      # is the ORDER: water rises through them in sequence, so a wet float ABOVE a dry one is
+      # physically impossible and means a stuck bobber. Reading them alphabetically would hide
+      # exactly the fault they exist to reveal.
+      #
+      # ── LABELLED BY DEPTH, NOT BY GROWTH-STAGE ROLE ─────────────────────────────────────────
+      # These rows used to read "mature — 6 in", "mid — 7.5 in", "day0 — 9 in". Those role names
+      # are retired and keeping them here was actively harmful, because the role vocabulary is
+      # what caused the float-proof bug fixed in (internal MR): the staleness sensor iterated
+      # ['low_guard','low_second','mature','mid','day0','hard_limit'] while the entities are
+      # named by depth, so four names resolved to nothing, the alarm latched on permanently, and
+      # the four real depth floats were never checked at all.
+      #
+      # The entity ids have always been depth-based -- low_guard, low_second, 6_inch, 7_5_inch,
+      # 9_inch, 11_inch -- so depth is the nomenclature, and a dashboard is where a dead
+      # vocabulary gets re-learned. The old comment explaining the "mature -> mid -> day0 runs
+      # UPWARD because the flood gets shallower as the crop matures" inversion has gone with
+      # them: it documented a confusion that no longer has anything to refer to.
+      #
+      # low_guard is ~3 in (the emptiness signal the drain waits on). low_second has no declared
+      # depth anywhere in the repo -- the ESPHome config notes its hole was pre-existing -- so it
+      # is deliberately left unlabelled rather than given a guessed number.
+      #
+      # LABELS KEPT SHORT because the entities card truncates: an early version ran to
+      # "(9 in target — NEVER PROVEN)" and was cut off mid-word on the dashboard.
+      - type: entities
+        title: Flood bobbers (bottom to top)
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_low_guard
+            name: 1 · low guard — ~3 in (empty)
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_low_second
+            name: 2 · low second
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_6_inch
+            name: 3 · 6 in
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_7_5_inch
+            name: 4 · 7.5 in
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_9_inch
+            name: 5 · 9 in
+          # BOTH, and saying only one of them misreads normal operation. sensor.hydro_target_depth
+          # and input_number.hydro_hard_limit_depth_in both read 11.0: mature lettuce is flooded
+          # TO this float on purpose, so "HARD LIMIT" alone made every ordinary flood look like it
+          # had overshot -- which is exactly the reading that latched faults on successful soaks
+          # until the package learned to compare the resolved entity ids instead.
+          - entity: binary_sensor.hydroponics_inputs_hydro_float_11_inch
+            name: 6 · 11 in — target + ceiling
+          - type: divider
+          # The derived view: these are what the automations actually gate on, so showing them
+          # beside the raw floats makes a disagreement self-explanatory instead of a mystery.
+          - entity: binary_sensor.hydro_all_floats_dry
+            name: all dry  (buckets empty)
+          - entity: binary_sensor.hydro_floats_disagree
+            name: DISAGREE  (wet above dry = stuck bobber)
+          - entity: binary_sensor.hydro_floats_healthy
+            name: readable
+          - entity: binary_sensor.hydro_float_proof_stale
+            name: proof stale  (a float has not moved in 35d)
+          # ── THE PROOF CLAIM COMES FROM THE SENSOR, NOT FROM A HARD-CODED LABEL ────────────
+          # Rows 5 and 6 carried the static text "· UNPROVEN", written when 9 in and the hard
+          # limit genuinely had never been tripped. Measured 2026-11-05 they were both proven
+          # the same morning -- 11 in at 10:02, 9 in at 10:09, unproven=[], oldest 0.0 days --
+          # so the card was asserting the opposite of the live sensor sitting two rows below it.
+          #
+          # A dashboard label cannot go stale if it is not a claim. These two rows read the
+          # attributes, so "which floats are unproven" and "how old is the oldest proof" are
+          # answers rather than annotations.
+          - type: attribute
+            entity: binary_sensor.hydro_float_proof_stale
+            attribute: unproven
+            name: unproven floats
+          - type: attribute
+            entity: binary_sensor.hydro_float_proof_stale
+            attribute: unresolvable
+            name: unresolvable (config error)
+          - type: attribute
+            entity: binary_sensor.hydro_float_proof_stale
+            attribute: oldest_proof_days
+            name: oldest proof (days, -1 = never)
+
+      # ── RESERVOIR BOBBERS (bottom to top) ───────────────────────────────────────────────
+      #
+      # The gauge this system spent three failed fills without. On 2026-10-23 a flood to 9 in
+      # stalled three times at ~7 in; the package blamed a float each time and a day went on
+      # the wrong layer. The reservoir was down to ~10 gallons and nothing could see it.
+      #
+      # BOTTOM TO TOP, like the bucket card above and for the same reason: water rises through
+      # them in sequence, so a wet float ABOVE a dry one is physically impossible and means a
+      # stuck bobber. Alphabetical order would hide exactly the fault the card exists to show.
+      #
+      # 3 IN BETWEEN FLOATS, so every reading is a range. 9 in wet means "9 to 12 in" -- nearly
+      # 6 gallons of headroom invisible between rungs. The depth and gallons rows below are
+      # named "min" for that reason, and `reads_as` states the range rather than implying a
+      # measurement the hardware cannot make.
+      - type: entities
+        title: Reservoir bobbers (bottom to top)
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hydroponics_inputs_hydro_reservoir_float_6_inch
+            name: 1 · 6 in — low water
+          - entity: binary_sensor.hydroponics_inputs_hydro_reservoir_float_9_inch
+            name: 2 · 9 in — min for a flood
+          - entity: binary_sensor.hydroponics_inputs_hydro_reservoir_float_12_inch
+            name: 3 · 12 in — keep at or above
+          - entity: binary_sensor.hydroponics_inputs_hydro_reservoir_float_15_inch
+            name: 4 · 15 in
+          - entity: binary_sensor.hydroponics_inputs_hydro_reservoir_float_18_inch
+            name: 5 · 18 in
+          - type: divider
+          # The derived view, beside the raw floats so a disagreement explains itself rather
+          # than becoming a mystery -- same arrangement as the bucket card.
+          - entity: sensor.hydro_reservoir_depth_min
+            name: depth (min)
+          - type: attribute
+            entity: sensor.hydro_reservoir_depth_min
+            attribute: reads_as
+            name: actually means
+          - entity: sensor.hydro_reservoir_gallons_min
+            name: gallons (min)
+          - type: attribute
+            entity: sensor.hydro_reservoir_gallons_min
+            attribute: floods_remaining_min
+            name: floods left (min, ~15 gal each)
+          - type: divider
+          - entity: binary_sensor.hydro_reservoir_can_flood
+            name: ENOUGH WATER to flood to 9 in
+          # NAMED "reason", NOT "why not". With the row called "why not" and the attribute
+          # reading "ok" on a healthy reservoir, this presented as a second unexplained fault --
+          # owner 2026-11-15: "i have no idea what the 'why not' fault even means". The attribute
+          # answers BOTH cases (it says "ok" when there is enough water and names the blocker
+          # when there is not), so the label has to be neutral or it contradicts its own value.
+          - type: attribute
+            entity: binary_sensor.hydro_reservoir_can_flood
+            attribute: why_not
+            name: reason
+          - entity: binary_sensor.hydro_reservoir_low
+            name: LOW  (below 6 in — top up)
+          - entity: binary_sensor.hydro_reservoir_floats_disagree
+            name: DISAGREE  (wet above dry = stuck bobber)
+          - entity: binary_sensor.hydro_reservoir_floats_readable
+            name: readable
+          # NAMES THE BROKEN ENTITY, not just the count. These five ids are derived from the
+          # ESPHome names rather than read back from the registry (the HA token is 401,
+          # (internal tracker)), and (internal MR) is the precedent for what a wrong id does: four names resolved
+          # to nothing, read as "dry", and latched an alarm for weeks. If this row is ever
+          # non-empty, that is the typo, named.
+          - type: attribute
+            entity: binary_sensor.hydro_reservoir_floats_readable
+            attribute: unreadable
+            name: unreadable (config error)
+
+      # ── FLOAT TEST: PROVE A BOBBER BY HAND, WITHOUT CREATING A FAULT ────────────────────────
+      #
+      # Added 2026-10-24 because the owner offered to flip the floats by hand and there was NO WAY
+      # TO ARM THE TEST from the dashboard -- the boolean existed and was unreachable, which is why
+      # day0 and hard_limit have never been proven in the life of this system.
+      #
+      # WHAT ARMING CHANGES, and what it deliberately does not: during the window the disagreement
+      # guard STILL CUTS POWER to both pumps (that is the protective half and it costs nothing when
+      # they are already off) but the LATCH, the phase change and the urgent page are suppressed.
+      # So moving floats by hand does not leave a fault behind. Without it, the test trips the very
+      # guard it is testing -- which is exactly why these floats went unproven.
+      #
+      # IT REFUSES UNLESS THE SYSTEM IS IDLE: phase must be `empty` and both pumps off. It is
+      # bounded (minutes below), self-clears on expiry, and is forced off on every HA restart,
+      # because a test mode that quietly survives a restart is a disabled safety nobody remembers.
+      #
+      # THE PROOF STAMPS ARE LISTED SO THE TEST IS SELF-VERIFYING: lift a float, watch its row
+      # change from blank to a timestamp. That is the evidence, not the absence of an error.
+      - type: entities
+        title: Float test  (prove a bobber by hand)
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.hydro_float_test
+            name: ARM float test  (needs phase = empty)
+          - entity: input_datetime.hydro_float_test_expires
+            name: window expires
+          - entity: input_number.hydro_float_test_minutes
+            name: window length (min)
+          - type: divider
+          - entity: input_text.hydro_float_proven_low_guard
+            name: proven · 1 low guard
+          - entity: input_text.hydro_float_proven_low_second
+            name: proven · 2 low second
+          # SAME DEPTH VOCABULARY AS THE BOBBER CARD ABOVE. These rows read "3 mature 6in",
+          # "4 mid 7.5in", "5 day0 9in" and "6 HARD LIMIT" -- and this card is the one a human
+          # reads WHILE lifting floats by hand, so it is the single most likely place for the
+          # retired role names to be copied back into a template. Which is how (internal MR) happened.
+          - entity: input_text.hydro_float_proven_6_inch
+            name: proven · 3 · 6 in
+          - entity: input_text.hydro_float_proven_7_5_inch
+            name: proven · 4 · 7.5 in
+          - entity: input_text.hydro_float_proven_9_inch
+            name: proven · 5 · 9 in
+          - entity: input_text.hydro_float_proven_11_inch
+            name: proven · 6 · 11 in
+          - type: divider
+          - entity: binary_sensor.hydro_float_proof_stale
+            name: proof stale  (any float unproven > 35d)
+          - entity: input_number.hydro_float_proof_max_days
+            name: proof valid for (days)
+
+      # ── CROP AGE, WHICH DRIVES EVERY DEPTH AND DELAY DECISION ───────────────────────────────
+      #
+      # sensor.hydro_plant_age already existed and was simply never shown. It reads -1 when
+      # occupancy is off or the sow date is unset, which is a deliberate "unknown" rather than a
+      # zero -- worth knowing before reading -1 as a fresh planting.
+      #
+      # These numbers decide real behaviour: flooding starts at hydro_flood_start_day after sow,
+      # the fans wait for hydro_fan_start_day, and the scheduled flood depth is 9in for the first
+      # half of the crop's life and 7.5in after. Not being able to see the age meant not being able
+      # to check any of them.
+      - type: entities
+        title: Crop age
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hydro_plant_age
+            name: days since sow  (-1 = unknown)
+          - entity: input_datetime.hydro_sow_date
+            name: sow date
+          - entity: input_number.hydro_flood_start_day
+            name: first flood, days after sow
+          - entity: input_number.hydro_fan_start_day
+            name: fans start, days after sow
+
+      # ── HALF CYCLES, FOR CALIBRATION AND RESCUE ─────────────────────────────────────────────
+      #
+      # FILL ONLY HAS NO TIMER, which is the point: a 9 in fill has never completed and its true
+      # duration is still UNMEASURED. Every attempt so far ended for an unrelated reason -- a stuck
+      # bobber, a reservoir below the ~15 gal a 9 in fill needs, or a human stopping it. The status
+      # line reports the elapsed seconds when the float finally trips, which is the number that
+      # settles whether the normal 354s budget is even enough.
+      #
+      # ⚠ FILL ONLY LEAVES WATER IN THE BUCKETS UNTIL SOMEBODY DRAINS IT. Roots sitting in static
+      # water is how root rot starts, so this is a calibration tool and not a watering mode.
+      - type: entities
+        title: Half cycles  (fill only / drain only)
+        show_header_toggle: false
+        entities:
+          - entity: input_select.hydro_manual_flood_depth
+            name: Depth for FILL ONLY
+          - entity: script.hydro_fill_only
+            name: FILL to depth and STOP  (no timer · will NOT drain)
+          - entity: script.hydro_drain_only
+            name: DRAIN to empty and STOP
+          - type: divider
+          - entity: input_datetime.hydro_t_fill_start
+            name: last fill started
+          - entity: input_text.hydro_status
+            name: status
+
+      # ── TOP-UP DOSE CALCULATOR ──────────────────────────────────────────────────────────────
+      #
+      # Requested 2026-10-25: "specify how many gallons of fresh water were added and it prorates
+      # how much nutrient (and root rot protection) to add".
+      #
+      # EVERY FIGURE COMES FROM THE DOCS, not from me:
+      #   Masterblend 4-18-38  1.1  g/gal  ) 2:2:1 by weight, leafy greens, approx EC 1.0-1.2
+      #   Calcium Nitrate      1.1  g/gal  ) docs/hydroponics-nutrient-dosing.md
+      #   Epsom salt           0.55 g/gal  )
+      #   Hydroguard           2    ml/gal   docs/hydroponics-build.md ("with every watering")
+      #
+      # PRORATED ON THE WATER ADDED, NOT THE RESERVOIR, because fresh water dilutes what is
+      # already dissolved -- the doc calls this dosing "the deficit volume". Dosing the full
+      # reservoir after a top-up is how a solution gets walked up to salt burn.
+      #
+      # ⚠ MIXING ORDER IS NOT OPTIONAL and the card repeats it, because getting it wrong
+      # PRECIPITATES the calcium and silently removes it from solution: Masterblend, then Epsom,
+      # then calcium nitrate PRE-DISSOLVED separately and added last.
+      #
+      # THE METER IS THE AUTHORITY. This is arithmetic from a starting point, not a measurement;
+      # the card says to confirm with the PC60 afterwards. pH matters too -- calcium nitrate pushes
+      # pH UP, and tap water had already taken it to 6.4 against a 5.8-6.2 target.
+      - type: entities
+        title: Top-up dose calculator
+        show_header_toggle: false
+        entities:
+          - entity: input_number.hydro_water_added_gal
+            name: Fresh water added (gal)
+      - type: markdown
+        # LITERAL BLOCK (|), NOT FOLDED (>-). Folding collapses newlines into spaces and the table
+        # arrives as one line of literal pipes. `>-` is for prose you are happy to have reflowed,
+        # and silently wrong for anything whose LAYOUT carries meaning.
+        #
+        # ── ROWS ARE IN MIXING ORDER, AND THAT IS A CORRECTNESS REQUIREMENT ───────────────────
+        #
+        # The first version listed Masterblend, Calcium Nitrate, Epsom -- alphabetical-ish and
+        # WRONG -- with the real order written as prose underneath. The owner followed the table,
+        # as anyone would, and pre-dissolved the EPSOM instead of the calcium nitrate, every time.
+        # His words, 2026-10-25: "if it gets presented to me in the order of masterblend >
+        # calcium > epsom, i will do it in that order".
+        #
+        # A list IS an instruction. Putting the sequence in prose below a table that implies a
+        # different sequence means the UI contradicts the procedure, and the UI wins. The number
+        # column and the inline "pre-dissolve" note on the calcium row exist so the table cannot be
+        # read in the wrong order.
+        #
+        # WHY THE ORDER IS CHEMICAL, not ceremonial: calcium nitrate added to a concentrated
+        # sulfate solution precipitates calcium sulfate, which drops calcium OUT of solution. That
+        # silently removes a nutrient and is a plausible cause of the pH wandering the owner has
+        # been chasing.
+        content: |
+          {% set g = states('input_number.hydro_water_added_gal') | float(0) %}
+          {%- if g <= 0 %}
+          Set **fresh water added** above to get the dose.
+          {%- else %}
+          **For {{ g }} gal of fresh water — add in this order:**
+
+          | # | add | amount |
+          |---|---|---|
+          | 1 | Masterblend 4-18-38 | **{{ (g * 1.1) | round(1) }} g** |
+          | 2 | Epsom salt | **{{ (g * 0.55) | round(1) }} g** |
+          | 3 | Calcium Nitrate 15.5-0-0 — **pre-dissolve in ~1 cup warm water, add LAST** | **{{ (g * 1.1) | round(1) }} g** |
+          | 4 | Hydroguard | **{{ (g * 2) | round(0) | int }} ml** |
+
+          Dissolve each fully before the next. **Calcium nitrate is third and goes in
+          pre-dissolved** — added to a concentrated sulfate solution it precipitates calcium
+          sulfate and drops calcium out of solution.
+
+          Then **measure EC with the PC60** and dial in — this is a starting point, not a
+          measurement. Check pH after too: calcium nitrate raises it.
+          {%- endif %}
+
