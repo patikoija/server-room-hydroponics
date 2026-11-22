@@ -1,0 +1,420 @@
+# KC868-AI — hydroponics water level inputs.
+#
+# KinCony KC868-AI: ESP32 + LAN8720 ethernet + 48 optocoupler-isolated DIGITAL inputs across
+# six PCF8574 expanders. NO analog inputs — every channel is on/off. Dry-contact float
+# switches are exactly what it is for; anything with a 0-10V or 4-20mA output cannot be read
+# by this board at all.
+#
+# Deployed from version control by automation, never flashed by hand from a laptop.
+# Do NOT edit a copy on a workstation and flash it by hand — that is how the config on the
+# device stops matching the config in git, and there is no way to tell from the outside.
+#
+# Secrets come from a secret store and are rendered to secrets.yaml at
+# deploy time. They are never committed.
+
+substitutions:
+  device_name: kc868-ai
+  # device_ip removed for publication — set a DHCP reservation for the board's MAC
+
+esphome:
+  name: ${device_name}
+  friendly_name: Hydroponics Inputs
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    advanced:
+      # Chip is rev 3.1 (read from the board, not assumed). Declaring it lets the build drop
+      # compatibility shims for older silicon.
+      minimum_chip_revision: "3.1"
+
+logger:
+
+api:
+  encryption:
+    key: !secret kc868_ai_api_key
+
+ota:
+  - platform: esphome
+    password: !secret kc868_ai_ota_password
+
+# Ethernet only — deliberately no wifi block. The board is wired, on an IoT VLAN of its own.
+# The LAN8720 pinout is KinCony's hardware design, not a choice.
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  phy_addr: 0
+  clk:
+    mode: CLK_OUT
+    pin: 17
+
+# GPIO5 is a strapping pin. That is KinCony's hardware choice for I2C SCL, not ours, and the
+# warning at build time is expected.
+#
+# scan: true makes the boot log list which expanders actually answered. Confirmed 2026-08-13:
+# all six responded at the addresses below.
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  scan: true
+
+# ── pH SENSING (Atlas EZO-pH) — WIRED? UNCOMMENT THE THREE LINES BELOW. ─────────────────────
+# That is the ONLY change needed at install time. The sensor itself lives in
+# packages/hydro-ph.yaml, which documents the wiring, the 0x63 address (no collision with the
+# PCF8574s at 0x21-0x26 above), and the two gotchas that waste an evening — the circuit shipping
+# in UART mode, and SMA-vs-BNC on the probe tail.
+#
+# It is a separate file rather than a substitution flag because ESPHome substitutions are plain
+# text replacement with no conditionals: a `hydro_ph_enabled: false` flag would compile the
+# sensor in anyway and log a failed I2C transaction every 60s forever. A file that is not
+# included cannot misbehave.
+#
+packages:
+  hydro_ph: !include packages/hydro-ph.yaml
+
+# Six PCF8574s, 8 inputs each. THE ADDRESSES ARE NOT IN NUMERIC ORDER — 0x24, 0x25, 0x21,
+# 0x22, 0x26, 0x23 maps to input banks 1-8, 9-16, 17-24, 25-32, 33-40, 41-48 respectively.
+# Sorting them "tidily" silently remaps every input.
+pcf8574:
+  - { id: hub_in_1, address: 0x24 }   # inputs 1-8
+  - { id: hub_in_2, address: 0x25 }   # inputs 9-16
+  - { id: hub_in_3, address: 0x21 }   # inputs 17-24
+  - { id: hub_in_4, address: 0x22 }   # inputs 25-32
+  - { id: hub_in_5, address: 0x26 }   # inputs 33-40
+  - { id: hub_in_6, address: 0x23 }   # inputs 41-48
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WATER LEVEL FLOATS — identification pass COMPLETE (2026-08-16).
+#
+# The ambiguity this block used to describe is gone, and not by reasoning: the floats were
+# rewired and then observed tripping in water. What the measurements settled:
+#
+#   WIRING. These are dry contacts and the board's inputs are optocoupler-isolated, so each
+#   float takes ONE wire to its input terminal and ONE to KCOM. The original install had
+#   pairs across two INPUT terminals, which completes no circuit — three floats read nothing
+#   through two full watch windows. KCOM pins 1 and 2 are commoned (verified: floats on pin 2
+#   read identically to floats on pin 1).
+#
+#   SENSE. Measured, not assumed. `inverted: true` was removed on 2026-08-16 so that WET
+#   reports as ON, which is the only sane polarity for a water sensor — with it, every
+#   automation would have had to read `to: 'off'` to mean "water arrived", which is correct
+#   today and a bug waiting to happen. device_class: moisture makes HA show Wet/Dry.
+#   The physical behaviour is unchanged; only what the board reports flipped.
+#
+#   ORIENTATION DOES NOT FLIP THE SENSE. IN3 is mounted upside down relative to the others
+#   (these floats carry an orientation arrow and hang down to trip at 90 degrees) and still
+#   reads the same way round as its neighbours. So mounting can follow the geometry without
+#   per-channel inversion.
+#
+#   That sentence used to read "and still reads True dry / False wet", describing the RAW pin
+#   level before `inverted: true` was dropped. Sitting eight lines under "WET reports as ON" it
+#   read as a flat contradiction, and on 2026-08-22 it cost a session's worth of doubt about
+#   whether the reported polarity was backwards.
+#
+#   THE FLOATS ARE NOT ALL THE SAME HARDWARE. The two low floats and the hard limit came with
+#   the unit; depth mature / mid / day0 were added by us and may be a different kind of switch
+#   entirely. So "identical pin config" proves NOTHING about identical sense — an NO and an NC
+#   float on the same wiring read opposite. Only measurement settles it, per channel:
+#
+#     PROVEN, ON = WET (five of six):
+#       low guard, low second   OBSERVED 2026-08-22 — a drain took both on -> off as the water
+#                               left, low second (~3.4") clearing 11s before low guard (~3.0"),
+#                               the order a falling waterline must produce.
+#       depth mature            OBSERVED 2026-08-16 14:51 — went off -> on as a fill reached it,
+#                               after the two low floats, same direction.
+#       depth mid, depth day0   OBSERVED in the 07:23-07:30 soak below — all five went off -> on
+#                               in ascending physical order. That fixes their sense RELATIVE to
+#                               low guard, which is anchored by the 2026-08-22 drain.
+#
+#     UNPROVEN — hard limit. It has never been observed responding to water: the soak
+#     deliberately stopped short of 13", and its only state change in recorder history is at
+#     07:09:40 on 2026-08-16, which coincides with the rewire/restart rather than a water event.
+#     It currently reads off, consistent with dry, but consistent is not proven. This is the
+#     float the FILL OVERFLOW FAILSAFE depends on, so it is the one worth proving deliberately —
+#     supervised, at the unit, with a hand on the plug. Note also that a wrong-sense hard limit
+#     is invisible to hydro_floats_disagree: it is the topmost float, and a topmost float
+#     reading dry never violates the "no wet above a dry" rule.
+#
+#   THEY DO NOT ACTUATE IN AIR. Waving one by hand moves nothing; buoyancy is the actuator.
+#   Two watch windows were spent discovering that. Test them in water.
+#
+# FULL SOAK, 2026-08-16 — all six installed, five exercised in one fill (the hard limit was
+# deliberately not reached). Every sensor fired in physical order with ZERO chatter, which is
+# the debounce below doing its job:
+#
+#     23.9s  low guard      ~3"
+#     33.5s  low second     ~3.4"     +9.6s
+#     83.0s  depth mature   ~6"      +49.5s
+#    147.5s  depth mid      ~7.5"    +64.5s
+#    203.7s  depth day0     ~9"      +56.2s
+#
+# THE FILL-BUCKET RISE RATE IS NOT THE SYSTEM RATE. Those gaps average ~38 s/inch across the
+# 1.5"-spaced floats. The calibration on file is 26 s/inch, measured for the whole 6-bucket
+# system. Both are right: this measures the FILL bucket rising while water simultaneously
+# gravity-feeds out to the plant buckets, which take 30-60s to equalise. Anything that
+# converts time to depth must know which of the two it means — which is precisely why depth
+# should be read from these floats rather than inferred from a stopwatch.
+#
+# Measured settle: a fill stopped at the ~9" float settles to ~8.8". Small enough that
+# trip-and-stop needs no top-up loop.
+#
+# PHYSICAL LAYOUT: the floats are NOT in a vertical column. They step ~3/4" horizontally
+# across the bucket face as they rise, so each 2"-travel float swings in clear water. A
+# consequence worth knowing: distance from the inlet splash differs per float, so chatter
+# will not be uniform across channels.
+#
+# DEBOUNCE, and the 2s is derived rather than picked. IN3 produced SEVEN transitions in 2.7
+# seconds as it settled at the waterline (the fill hose free-falls ~12" from the barrel, so
+# the surface is agitated). The longest quiet gap inside that burst was 1.0s, so a 2s filter
+# collapses it to one clean edge. Cost: 2s of extra fill before a trip registers, which at the
+# measured 26 s/inch is 0.077" — negligible even for the cutoff.
+#
+# Without this, anything driven off these channels sees seven edges and can cycle a pump.
+# ─────────────────────────────────────────────────────────────────────────────
+binary_sensor:
+  # --- installed, trip depths measured against the bucket floor ----------------------
+  - platform: gpio
+    name: "Hydro float low guard"
+    id: hydro_float_low_guard
+    # Trips ~3". Mounted ~1" off the floor, which independently confirms the ~2" of float
+    # travel measured on the bench.
+    pin: { pcf8574: hub_in_1, number: 0, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  - platform: gpio
+    name: "Hydro float low second"
+    id: hydro_float_low_second
+    # Trips ~3.4" — only ~0.4" above the one above it. Almost certainly not deliberate; both
+    # were pre-existing. Left in place because the holes are already drilled.
+    pin: { pcf8574: hub_in_1, number: 1, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  - platform: gpio
+    name: "Hydro float 6 inch"
+    id: hydro_float_6_inch
+    # 6in, tape-measured by the owner 2026-11-02. The previous note here said "drilled at 4"
+    # for a 6" target; measured trip ~5.3" on first fill" -- that was a first-fill observation
+    # and is superseded by the direct measurement. Mounted inverted.
+    pin: { pcf8574: hub_in_1, number: 2, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # --- installed 2026-08-16, drilled at 5.5" and 7" for 1.5" spacing --------------------
+  - platform: gpio
+    name: "Hydro float 7.5 inch"
+    id: hydro_float_7_5_inch
+    pin: { pcf8574: hub_in_1, number: 3, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  - platform: gpio
+    name: "Hydro float 9 inch"
+    id: hydro_float_9_inch
+    pin: { pcf8574: hub_in_1, number: 4, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # --- the hard limit ----------------------------------------------------------------
+  - platform: gpio
+    name: "Hydro float 11 inch"
+    id: hydro_float_11_inch
+    # 11in, tape-measured by the owner 2026-11-02 -- and it is the DEEPEST float on the rig.
+    # The note here used to say "reaches full articulation at ~13"", which the owner rejected
+    # outright: "it literally can't be 13" the buckets are only 12" deep". That figure is where
+    # the 13in default in hydro_hard_limit_depth_in came from, so this comment was the source of
+    # a number that propagated into the HA package.
+    #
+    # IT IS NO LONGER ONLY A CEILING, which is why this is named for its depth and not its job.
+    # The deep-soak regime floods TO this float on purpose (owner, 2026-10-31: flood to "the
+    # sensor we're currently calling the hard stop"), so on a scheduled soak fill it is the
+    # TARGET. Encoding "hard_limit" in the name made every reader assume a trip here was a
+    # fault, which is exactly the assumption that latched hydro_fault_latch on every successful
+    # soak fill and halted watering on 2026-11-02.
+    #
+    # There is no 12in float: 11in is the closest rung that exists, which is why the soak
+    # targets it rather than a nominal 12.
+    #
+    # It does not stop water instantly — Z-Wave latency, pump spin-down and whatever is
+    # already in the manifold all land after the trip.
+    pin: { pcf8574: hub_in_1, number: 5, mode: INPUT }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # --- RESERVOIR DEPTH GAUGE, inputs 24-29, added 2026-11-07 ----------------------------
+  # A 5-bobber depth gauge the owner built for the NUTRIENT RESERVOIR -- floats at 6" then
+  # every 3" up to 18". NOT the grow buckets; those are the floats above, and conflating the
+  # two is why everything here says `res`.
+  #
+  # ── NAMED BY PORT, NOT BY DEPTH, AND THAT IS THE POINT ──────────────────────────────
+  # The owner wired all five on 2026-11-07 and does not know what order they went in:
+  # "i want 24 to be the 6 inch sensor and for all i know it's the 18 inch sensor". So an
+  # entity called "reservoir float 6 inch" would be a claim nobody has measured. These are
+  # named for the TERMINAL they are on, which is the only thing currently known to be true.
+  #
+  # ── THE PORT-TO-DEPTH MAPPING IS MEASURED, AND IT IS NOT IN ORDER ───────────────────
+  # Owner actuated the floats one at a time, bottom to top, 2026-11-07, while the watcher ran
+  # (logged by an input-watcher job). Each transition is timestamped, which is what makes the order unambiguous:
+  #
+  #     depth   terminal   fired at   held
+  #       6"       26        41.0s     5.2s   <- bottom
+  #       9"       27        47.9s     6.0s
+  #      12"       29        55.0s     5.4s
+  #      15"       25        61.8s     5.7s
+  #      18"       28        68.9s     5.7s   <- top
+  #
+  # Five distinct terminals, each appearing exactly once, with 1.1-1.7s of clear air between
+  # floats and no overlap. The unwired control on port 24 never moved throughout.
+  #
+  # ⚠ THE TERMINALS ARE DELIBERATELY NOT RE-ORDERED IN HARDWARE. The owner's original intent was
+  # 25=6" ascending to 29=18"; the actual wiring is 26, 27, 29, 25, 28. Absorbing that here costs
+  # nothing and avoids re-terminating five working connections to fix a cosmetic problem --
+  # rewiring would risk introducing a NEW mis-mapping to fix one that is now known.
+  #
+  # SO: IF ANYONE RE-TERMINATES THESE, THIS MAPPING IS VOID. Re-run the one-at-a-time pass
+  # (template 130, watch_seconds 240) and update the table. Do not assume ascending order.
+  #
+  # ── SIX PORTS DECLARED FOR FIVE FLOATS, DELIBERATELY ────────────────────────────────
+  # The owner said ports 25-29 when planning and then said port 24 should be the 6" float.
+  # Those are on DIFFERENT EXPANDERS -- 24 is hub_in_3 #7, 25-29 are hub_in_4 #0-4 -- so a
+  # one-port slip changes which chip the bottom float lands on. Declaring 24 through 29
+  # covers both candidate ranges, costs nothing (unconnected optocoupler inputs just hold a
+  # steady state), and lets the WATCH tell us which five are live instead of asking.
+  #
+  # BANK ORDER IS NOT NUMERIC: 0x24,0x25,0x21,0x22,0x26,0x23 -> 1-8, 9-16, 17-24, 25-32,
+  # 33-40, 41-48. Sorting that block tidily silently remaps every input.
+  #
+  # ── MOUNTED UPSIDE DOWN RELATIVE TO THE BUCKET FLOATS, ON PURPOSE ───────────────────
+  # Owner, 2026-11-07: the bucket floats had to be drilled about 1/2" BENEATH the desired
+  # trip point because they sit angled upright; mounting these inverted means the hole is
+  # drilled where the float sits at 90 degrees, which measures truer.
+  #
+  # THE ELECTRICAL CONSEQUENCE IS NOW MEASURED, not predicted. Flipping a pivot float 180
+  # degrees swaps which way the contact closes, so these were expected to read opposite to the
+  # bucket floats. On 2026-11-07 the owner inverted the whole assembly on the bench -- gravity
+  # actuating all five at once, which beats lifting them individually -- and the raw pin levels
+  # were:
+  #
+  #     port   upright (dry)   inverted (wet)
+  #     24          True            True        <- unwired control, DID NOT MOVE
+  #     25-29       True            False       <- all five changed
+  #
+  # So RAW True = dry and RAW False = wet, which is indeed inverted relative to the bucket
+  # floats. `inverted: true` now makes WET report as ON, matching the bucket convention, and
+  # `device_class: moisture` renders Wet/Dry truthfully rather than as an assumption.
+  #
+  # The control not moving is what makes this conclusive. Before the test, True meant either
+  # "dry float" or "no float attached" -- indistinguishable -- so an unchanged control rules out
+  # a board-wide artefact and proves all five are electrically live.
+  #
+  # ── WHAT THIS GAUGE IS ACTUALLY FOR ────────────────────────────────────────────────
+  # Owner: "i just want you to know when there is less than 6 inches of water in the tank."
+  # The intended behaviour is that the 6" float goes dry only in the LAST 10-15 SECONDS of a
+  # fill; if it goes dry earlier than that, the fill physically cannot complete. So the useful
+  # signal is a FILL-WILL-FAIL predicate, not a volume readout.
+  #
+  # ── THE VESSEL IS IDENTIFIED, AND THE VOLUME QUESTION IS SETTLED ────────────────────
+  # Grow1 60-gallon collapsible reservoir (GrowAce is the retailer; Grow1 is the house brand):
+  # 24" diameter filled, 31" tall. Checks out independently -- pi*12^2*31 = 60.7 gal against a
+  # 60 gal nameplate -- and matches the owner's "60 gallons is roughly 30 inches".
+  #
+  #     uniform-cylinder gal/in = 1.958
+  #       6" -> 11.8 gal     9" -> 17.6 gal    12" -> 23.5 gal
+  #      15" -> 29.4 gal    18" -> 35.3 gal    31" -> 60.7 gal
+  #
+  # THE OWNER'S 2.0 gal/in IS ACCURATE TO ~2%. My earlier geometric figure of 1.646 came from
+  # a 22" diameter and was WRONG -- 22" is roughly the unfilled/nominal width; a flexible tank
+  # distends to 24" under load. I had recorded 1.646 as "the geometry" and the owner's 2.0 as
+  # "the rough one". It was the other way around.
+  #
+  # AND IT WAS CONFIRMED BY THE FLOATS BEFORE THE PRODUCT WAS LOOKED UP, which is the part
+  # worth keeping. At ~28 gallons on 2026-11-07 the array read 6/9/12 WET and 15/18 DRY. That
+  # brackets the level between the 12" and 15" trips, so gal/in is between 28/15 = 1.87 and
+  # 28/12 = 2.33. 1.958 lands inside; 1.646 is excluded, since it would have put the level at
+  # 17" and the 15" float wet. The calibration the owner said was impossible without draining
+  # the tank fell out of a routine reading.
+  #
+  # ⚠ gal/in IS NOT ACTUALLY CONSTANT. This is a FLEXIBLE tank on six support poles: the walls
+  # bow outward as it fills, so the cross-section near the bottom is smaller than 24" and the
+  # low-level volumes above are OVERSTATED. Treat the 6" figure in particular as an upper
+  # bound. This matters least where it is worst -- at the bottom the 6" FLOAT is the signal,
+  # not the computed gallons.
+  #
+  # DEBOUNCE 2s matches the bucket floats. Raise it here if a channel chatters when the
+  # reservoir sloshes, rather than filtering in HA.
+  # DELIBERATELY UNWIRED, AND KEPT. This is the known-negative control: it is the reference
+  # for what "nothing attached" looks like. It earned that role on 2026-11-07 -- when the
+  # whole gauge was inverted, 25-29 all changed and THIS DID NOT, which is what makes the
+  # change attributable to the floats rather than to something board-wide. Left on the
+  # 17-24 bank (hub_in_3 #7) on purpose: a control on a DIFFERENT expander also rules out a
+  # single PCF8574 misbehaving. Do not wire a float to this port without replacing the
+  # control somewhere else.
+  - platform: gpio
+    name: "Hydro reservoir input 24 (unwired control)"
+    id: hydro_res_in_24
+    pin: { pcf8574: hub_in_3, number: 7, mode: INPUT }
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # depth 15" -- terminal 25, measured 2026-11-07 (see the mapping table above)
+  - platform: gpio
+    name: "Hydro reservoir float 15 inch"
+    id: hydro_res_float_15_inch
+    pin: { pcf8574: hub_in_4, number: 0, mode: INPUT, inverted: true }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # depth 6" -- terminal 26, measured 2026-11-07 (see the mapping table above)
+  - platform: gpio
+    name: "Hydro reservoir float 6 inch"
+    id: hydro_res_float_6_inch
+    pin: { pcf8574: hub_in_4, number: 1, mode: INPUT, inverted: true }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # depth 9" -- terminal 27, measured 2026-11-07 (see the mapping table above)
+  - platform: gpio
+    name: "Hydro reservoir float 9 inch"
+    id: hydro_res_float_9_inch
+    pin: { pcf8574: hub_in_4, number: 2, mode: INPUT, inverted: true }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # depth 18" -- terminal 28, measured 2026-11-07 (see the mapping table above)
+  - platform: gpio
+    name: "Hydro reservoir float 18 inch"
+    id: hydro_res_float_18_inch
+    pin: { pcf8574: hub_in_4, number: 3, mode: INPUT, inverted: true }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+  # depth 12" -- terminal 29, measured 2026-11-07 (see the mapping table above)
+  - platform: gpio
+    name: "Hydro reservoir float 12 inch"
+    id: hydro_res_float_12_inch
+    pin: { pcf8574: hub_in_4, number: 4, mode: INPUT, inverted: true }
+    device_class: moisture
+    filters: [delayed_on: 2s, delayed_off: 2s]
+
+
+  # --- unused channels, kept exposed for the spare capacity -----------------------------
+  - platform: gpio
+    name: "Input 07"
+    pin: { pcf8574: hub_in_1, number: 6, mode: INPUT, inverted: true }
+  - platform: gpio
+    name: "Input 08"
+    pin: { pcf8574: hub_in_1, number: 7, mode: INPUT, inverted: true }
+  - platform: gpio
+    name: "Input 09"
+    pin: { pcf8574: hub_in_2, number: 0, mode: INPUT, inverted: true }
+  - platform: gpio
+    name: "Input 10"
+    pin: { pcf8574: hub_in_2, number: 1, mode: INPUT, inverted: true }
+  - platform: gpio
+    name: "Input 11"
+    pin: { pcf8574: hub_in_2, number: 2, mode: INPUT, inverted: true }
+  - platform: gpio
+    name: "Input 12"
+    pin: { pcf8574: hub_in_2, number: 3, mode: INPUT, inverted: true }

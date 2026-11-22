@@ -1,0 +1,214 @@
+# hydro-ph.yaml — Atlas Scientific EZO-pH on the KC868-AI's existing I2C bus.
+#
+# NOT ACTIVE UNTIL INCLUDED. This file is deployed to the repo ahead of the hardware so it can
+# be reviewed and corrected before anything is wired. It does nothing until kc868-ai.yaml
+# references it under `packages:` — see the commented block there.
+#
+# WHY A SEPARATE FILE RATHER THAN A SUBSTITUTION FLAG. The obvious approach is a
+# `hydro_ph_enabled: "false"` substitution, and it does not work: ESPHome substitutions are
+# plain text replacement with no conditionals, so the block would compile in regardless and the
+# flag would be decorative. An `ezo` sensor with no board on the bus logs a failed I2C
+# transaction every update_interval forever, and a permanently-failing entity is exactly what
+# teaches people to ignore the one that matters later. A file that is simply not included
+# cannot do that.
+#
+# ── WIRING (kit KIT-101P) ────────────────────────────────────────────────────────────────────
+#   probe --(1 m cable)--> Electrically Isolated EZO Carrier Board --> EZO-pH circuit (socket)
+#   carrier board 4-wire tail --> KC868-AI:  VCC 3.3V, GND, SDA GPIO4, SCL GPIO5
+#
+# The circuit does NOT wire to the KC868 directly; it seats on the carrier board, and the
+# carrier is what joins the I2C bus. Isolation sits between the probe and logic ground, which
+# is what stops a future EC probe and this one interfering through the water.
+#
+# ── TWO THINGS THAT WILL WASTE AN EVENING IF UNCHECKED ──────────────────────────────────────
+# 1. EZO circuits sometimes ship in UART mode. In UART mode this device NEVER appears in an I2C
+#    scan and looks dead. Follow the datasheet pin-short procedure to switch it to I2C first.
+# 2. The probe terminates in SMA by default (BNC is a $2 option) while carrier boards are
+#    commonly BNC. Check which the kit shipped before assuming a mismatch is a fault.
+#
+# ── ADDRESS ─────────────────────────────────────────────────────────────────────────────────
+# 0x63 is the EZO-pH factory default. The bus already carries six PCF8574 expanders at
+# 0x21-0x26 (kc868-ai.yaml), so there is no collision. Confirm with the boot-time i2c scan,
+# which is already enabled (`scan: true`).
+sensor:
+  - platform: ezo
+    id: hydro_ph_ezo
+    address: 0x63
+    name: "Hydro reservoir pH"
+    unit_of_measurement: "pH"
+    accuracy_decimals: 2
+    # 60s is deliberate rather than fast. Reservoir pH moves over hours; a tighter interval buys
+    # no signal and multiplies I2C traffic on a bus that is also polling 48 inputs.
+    update_interval: 60s
+    filters:
+      # A pH outside 0-14 is not a reading, it is a fault — an unplugged probe or a failed
+      # transaction. Dropping it keeps a garbage value from being averaged into a real trend.
+      - filter_out: nan
+      - lambda: 'return (x >= 0.0 && x <= 14.0) ? x : NAN;'
+
+    # ── THE CIRCUIT'S OWN VIEW OF ITS CALIBRATION ────────────────────────────────────────────
+    # These two triggers are what make a staleness gate possible at all ((internal ticket)). Verified
+    # against the ESPHome `ezo` component for the pinned image (2026.7.4): the lambda methods are
+    # get_calibration() and get_slope(), and the results arrive on the on_calibration /
+    # on_slope triggers as a std::string in `x`.
+    #
+    # PARSED DEFENSIVELY, BY TOKEN, NOT BY OFFSET. The EZO answers `?CAL,3` and
+    # `?SLOPE,99.7,100.3,-0.89`, but ESPHome strips the prefix for some queries and not others
+    # depending on version, and the SLOPE zero-point field only exists on newer probe firmware.
+    # Slicing at a fixed index would work on the bench and break on a firmware revision; pulling
+    # the numbers out by scanning works either way.
+    on_calibration:
+      - lambda: |-
+          std::string s = x;
+          int points = -1;
+          // Walk backwards to the last run of digits; that is the point count in every form
+          // the circuit or the component can hand us.
+          for (int i = (int) s.size() - 1; i >= 0; i--) {
+            if (isdigit((unsigned char) s[i])) {
+              int j = i;
+              while (j >= 0 && isdigit((unsigned char) s[j])) j--;
+              points = atoi(s.substr(j + 1, i - j).c_str());
+              break;
+            }
+          }
+          if (points >= 0) id(hydro_ph_cal_points).publish_state(points);
+    on_slope:
+      - lambda: |-
+          // Collect the numeric fields in order: acid %, base %, and (newer firmware) the zero
+          // point offset in mV. A probe in good health reads ~95-105% on both slopes; drift
+          // shows up here long before the reading looks obviously wrong, which is exactly the
+          // failure mode a days-since-calibration number alone cannot see.
+          std::string s = x;
+          std::vector<float> vals;
+          std::string tok;
+          for (size_t i = 0; i <= s.size(); i++) {
+            char c = (i < s.size()) ? s[i] : ',';
+            if (c == ',') {
+              bool numeric = !tok.empty();
+              for (char t : tok) if (!(isdigit((unsigned char) t) || t == '.' || t == '-' || t == '+')) numeric = false;
+              if (numeric) vals.push_back(atof(tok.c_str()));
+              tok.clear();
+            } else {
+              tok += c;
+            }
+          }
+          if (vals.size() >= 1) id(hydro_ph_slope_acid).publish_state(vals[0]);
+          if (vals.size() >= 2) id(hydro_ph_slope_base).publish_state(vals[1]);
+
+  # Published to by the triggers above; they never poll on their own, hence `never`. Marked
+  # diagnostic so they land in the device page rather than cluttering the Lovelace panel.
+  - platform: template
+    id: hydro_ph_cal_points
+    name: "pH calibration points"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    icon: mdi:target
+  - platform: template
+    id: hydro_ph_slope_acid
+    name: "pH probe slope acid"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: never
+    entity_category: diagnostic
+    icon: mdi:angle-acute
+  - platform: template
+    id: hydro_ph_slope_base
+    name: "pH probe slope base"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: never
+    entity_category: diagnostic
+    icon: mdi:angle-acute
+
+# ── ASK THE CIRCUIT PERIODICALLY, AND IMMEDIATELY AFTER A CALIBRATION ────────────────────────
+# 10 minutes, not 60 seconds. Calibration state changes only when a human presses a button, so
+# polling it fast buys nothing and adds I2C traffic to a bus already polling 48 inputs plus the
+# pH read. The real reason it is polled AT ALL rather than only after a press: HA must be able to
+# tell "3 points stored" from "never heard from the probe" after a restart, and an entity with no
+# value since boot is indistinguishable from a cleared calibration.
+#
+# The two queries are spaced. The EZO is a single device on a shared bus answering one command at
+# a time; firing both in the same instant just makes the second wait, and a 2s gap keeps the
+# traffic away from the 60s read.
+interval:
+  - interval: 600s
+    then:
+      - lambda: 'id(hydro_ph_ezo).get_calibration();'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_slope();'
+
+# ── STILL NOT WIRED TO DOSING, BUT THE REASON HAS CHANGED ───────────────────────────────────
+# (internal ticket) and the BOM notes are explicit: a drifted pH probe reports a plausible number forever.
+# That is the same failure class as a stuck float, but it kills the crop slowly instead of
+# obviously, so it is harder to catch and worse when missed. Automated dosing waits on a
+# calibration-staleness sensor.
+#
+# THAT SENSOR NOW EXISTS ((internal ticket)). The trigger names this note used to say were unverified have
+# been verified against the ESPHome `ezo` component for the pinned image and are in use above:
+# get_calibration()/on_calibration and get_slope()/on_slope. HA turns them into
+# binary_sensor.hydro_ph_dosing_permitted — see the pH gate block in
+# stacks/homeassistant/config/packages/hydroponics.yaml.
+#
+# What is still missing is the ACTUATOR, not the gate: there is no dosing pump on this system
+# yet. Hardware was ordered 2026-10-06 ((internal ticket)). Nothing here moves liquid, so this file remains
+# read-only in effect — but it is no longer the thing blocking dosing.
+
+# ── CALIBRATION — the ONLY way to actually calibrate this probe ─────────────────────────────
+# The EZO stores calibration in its own circuit, set by SENDING commands — NOT by soaking in
+# buffer. Until these buttons existed the firmware had no command path at all (the sensor above
+# is read-only), which is exactly why a probe that sat in 7.0 for a day still read ~4.9 in a 4.0
+# buffer: nothing ever issued Cal,mid. ESPHome ezo exposes the calibration as lambda methods
+# (esphome.io/components/sensor/ezo); these template buttons call them.
+#
+# ORDER: press MID FIRST — set_calibration_point_mid clears any prior calibration and anchors the
+# offset — THEN low, THEN high, each with the probe in the MATCHING buffer and the reading
+# SETTLED. Confirm it took via the live pH value: after "cal mid" in 7.0 it should read ~7.00;
+# after "cal low" in 4.0, ~4.00. "clear calibration" wipes all points (start over).
+#
+# ── EVERY BUTTON RE-READS THE CIRCUIT AFTERWARDS, AND THAT IS THE POINT OF THE GATE ──────────
+# Without this the point count only refreshes on the 10-minute poll, so for up to ten minutes
+# after pressing CLEAR the gate would still see "3 points stored" and keep permitting dosing
+# against a probe with no calibration at all. The 2s delay lets the circuit finish the write
+# before it is asked what it holds — these are consecutive commands on one I2C device.
+#
+# It also makes the press self-verifying in the UI: the point count moves 0->1->2->3 as the
+# three buffers are done, which is a far better confirmation than squinting at whether the live
+# reading snapped close enough to the buffer value.
+button:
+  - platform: template
+    name: "pH cal MID 7.0 (do first)"
+    entity_category: config
+    on_press:
+      - lambda: 'id(hydro_ph_ezo).set_calibration_point_mid(7.00);'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_calibration();'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_slope();'
+  - platform: template
+    name: "pH cal low 4.0"
+    entity_category: config
+    on_press:
+      - lambda: 'id(hydro_ph_ezo).set_calibration_point_low(4.00);'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_calibration();'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_slope();'
+  - platform: template
+    name: "pH cal high 10.0"
+    entity_category: config
+    on_press:
+      - lambda: 'id(hydro_ph_ezo).set_calibration_point_high(10.00);'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_calibration();'
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_slope();'
+  - platform: template
+    name: "pH clear calibration"
+    entity_category: config
+    on_press:
+      - lambda: 'id(hydro_ph_ezo).clear_calibration();'
+      # THE MOST IMPORTANT RE-READ OF THE FOUR. This press is the one that makes the probe
+      # untrustworthy, so the gate must learn about it immediately rather than on the next poll.
+      - delay: 2s
+      - lambda: 'id(hydro_ph_ezo).get_calibration();'
