@@ -21,7 +21,7 @@ failsafes. Six of the twelve sites are plumbed; the rest are on hand and waiting
 | | |
 |---|---|
 | [01 — System and physical layout](docs/01-system.md) | Topology, dimensions, why every bucket must sit at one elevation, and the two air gaps that make 3 ft of head safe |
-| [02 — Bill of materials](docs/02-bom.md) | 35 line items, what was bought, what was deferred, and the mistakes worth not repeating |
+| [02 — Bill of materials](docs/02-bom.md) | Every line item including the control hardware, what was deferred behind a measurement, and the mistakes worth not repeating |
 | [03 — The controller (KC868-AI)](docs/03-controller.md) | ESP32 + Ethernet + 48 isolated digital inputs, six I²C expanders, and why it has no analog inputs |
 | [04 — Float sensors](docs/04-float-sensors.md) | The depth ladder: wiring, how the sense of each float was *measured* rather than assumed, trip depths, and the two evenings lost to floats that do not actuate in air |
 | [05 — Reservoir pH (Atlas EZO-pH)](docs/05-ph.md) | Stamp orientation, the UART→I²C switch that makes the difference between "reading" and "apparently dead", commissioning tells, probe care |

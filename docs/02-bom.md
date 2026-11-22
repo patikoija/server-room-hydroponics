@@ -1,8 +1,13 @@
 # 02 — Bill of materials
 
-Thirty-five line items, tracked in tiers: Tier 1 is what the system needs to run, Tier 2 is
-deferred until a measurement says it is needed. Prices are what was paid or quoted at the time
-and will have moved.
+Tracked in tiers: Tier 1 is what the system needs to run, Tier 2 is deferred until a measurement
+says it is needed.
+
+**Two kinds of price appear below and they are not equally trustworthy.** Most lines come from a
+tracked parts list and are what was paid or quoted at the time. The **control and automation**
+block is different: that hardware predates the grow — it was already in the house doing other
+jobs — so there is no receipt in the parts list for it. Those figures are marked **approx.** and
+are street prices, not records. Everything will have moved anyway.
 
 ## System
 
@@ -37,6 +42,59 @@ Twelve 5-gallon flex-bucket sites plus a 60-gallon control bucket / reservoir, r
 
 See [07 — Lighting](07-lighting.md) for why the fixture identity matters: this build was
 documented as having an SF-2000 for a long time, which is a 3× error in light output.
+
+## Tier 1 — control and automation
+
+The parts list this BOM came from covered the *grow*, and this block covers the *controls* —
+which is why it was missing from the first version of this document. Without it there is nothing
+between a decision and a pump.
+
+| Item | Price | Status |
+|---|---:|---|
+| **KinCony KC868-AI** — ESP32 + LAN8720 Ethernet, 48 optocoupler-isolated digital inputs | **~$70 approx.** | owned |
+| **Zooz ZEN20** VER 2.0 Z-Wave power strip — 5 individually switched outlets + always-on USB | **~$65 approx.** | owned |
+| **Zooz 800 Series Z-Wave Stick** (ZST39) — USB controller | **~$30 approx.** | owned |
+| Float switches, dry contact, side-mount — 3 added to the 3 that shipped with the kit | ~$5 each approx. | owned |
+| 12 V DC supply for the KC868-AI | ~$10 approx. | owned |
+| Ethernet patch cable | — | |
+| Clip fans × 2 (one per row) | ~$18 each approx. | owned |
+
+### Why each of these and not something else
+
+**KC868-AI — because the sensors are dry contacts.** Forty-eight optocoupler-isolated digital
+inputs is a lot of float ladder for the money, and the isolation keeps the wet side away from the
+logic side. **It has no analog inputs at all**, which is the single most important thing to know
+before buying one: anything with a 0–10 V or 4–20 mA output cannot be read by this board. See
+[03 — The controller](03-controller.md).
+
+**ZEN20 — because of the firmware auto-off timer, not the five outlets.** Plenty of strips switch
+five outlets. The reason this one is load-bearing is that each outlet can be given an **auto-off
+timer that runs on the strip**, so it still cuts the fill pump when the automation server is down,
+rebooting or broken. That is the last thing between a stuck relay and water on the floor. If you
+substitute a different strip, **check for that feature specifically** — see
+[09 — The control chain](09-control-chain.md#its-firmware-auto-off-timer-is-the-real-backstop).
+
+**The stick — because the mesh belongs in software.** A USB radio plus `zwave-js-ui` means the
+pairing database is a volume you can back up, rather than state inside an appliance. It also means
+exactly one machine can hold the radio, which is a real constraint on moving things.
+
+**The floats — note that three of the six are not the kit's.** The two low floats and the hard
+limit came with the system; the three depth floats were bought separately and may be a different
+switch type entirely. That is why every channel's sense had to be measured rather than assumed
+([04](04-float-sensors.md#the-floats-are-not-all-the-same-hardware)).
+
+**The fans — the cheapest parts on this list and the ones that cost two crops.** They were mounted
+and left unwired through both batches; one died of damping-off and the other tipburned. If you
+build one of these, wire them on day one.
+
+### What is deliberately not here
+
+- **A hub or a controller appliance.** Home Assistant already ran in this house on an existing
+  server, so the grow added no compute. If you are starting from nothing, that is a cost this BOM
+  does not show you.
+- **A dosing pump.** None fitted yet; the pH loop is read-only by choice until the actuator and
+  its separate controller node are in place ([05](05-ph.md#known-trade-off-one-failure-domain)).
+- **Smart plugs for the lights.** They are on the same ZEN20; outlets are cheaper than devices.
 
 ## Tier 1 — safety
 
